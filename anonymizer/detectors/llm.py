@@ -18,7 +18,10 @@ import re
 import urllib.request
 from typing import List, Optional
 
-from ..config import LMSTUDIO, LLM_SKIP_TYPES, is_detector_enabled, is_type_enabled, log
+from ..config import (
+    LMSTUDIO, LLM_SKIP_TYPES, is_detector_enabled, is_detector_type_enabled,
+    is_type_enabled, log,
+)
 from ..merge import apply_spans, merge_spans
 from ..span import Span
 
@@ -224,6 +227,7 @@ def verify_with_llm(masked: str, max_passes: int = 2) -> str:
         spans = parse_entities(content, masked)
         spans = [s for s in spans if not _inside_placeholder(masked, s)]
         spans = [s for s in spans if is_type_enabled(s.type)]  # уважаем конфиг типов
+        spans = [s for s in spans if is_detector_type_enabled(NAME, s.type)]  # и пер-детекторный набор
         if not spans:
             break
         spans = merge_spans(masked, spans)

@@ -71,7 +71,11 @@ There is no build step and no linter configured.
 4. **`apply_spans`** — replace spans with labels.
 5. **`verify_with_llm`** — LLM re-reads the masked text to catch leftover PII (up to
    `max_verify_passes`).
-6. **`collapse_repeated_labels`** — final text-only step: collapse runs of *identical* adjacent
+6. **`relabel_groups`** — text-only step: rewrite fine labels into coarse groups per
+   `config.LABEL_GROUPS` (`[Имя]`/`[Фамилия]`/`[Отчество]` → `[ФИО]`, `[Локация]` → `[Адрес]`).
+   After this, the fine labels no longer appear in output; runs after verify so it also normalizes
+   verify-added labels, and it does not touch detection or merge priorities.
+7. **`collapse_repeated_labels`** — final text-only step: collapse runs of *identical* adjacent
    labels (`[X] [X]` → `[X]`); different neighbors are left alone.
 
 `anonymize(text)` is the thin wrapper returning just `.text`. `anonymize_detailed` also takes
@@ -82,8 +86,11 @@ the per-detector API endpoint and the eval scripts call
 `anonymize_detailed(text, [one_detector], verify=False)` to isolate a single detector even if it
 is disabled in config. `DETECTOR_LLM = False` also disables the verify pass (checked inside
 `verify_with_llm`). Spans of
-types disabled via `ANONYMIZE_TYPES` are dropped **before merge** (see Configuration), both here
-and inside `verify_with_llm`.
+types disabled via `ANONYMIZE_TYPES`, and spans whose **source detector is not allowed to replace
+that type** via `DETECTOR_TYPES`, are dropped **before merge** (see Configuration), both here and
+inside `verify_with_llm`. The `DETECTOR_TYPES` per-detector type filter applies on **every** path,
+including an explicit detector list — it is *not* bypassed the way the `DETECTORS_ENABLED` on/off
+filter is.
 
 ### Detector ensemble (`anonymizer/detectors/`)
 
@@ -182,12 +189,29 @@ Per-type masking switches: `ANONYMIZE_<TYPE>` constants (one per span type) feed
 `ANONYMIZE_TYPES` dict; `is_type_enabled(type)` is the runtime check. The pipeline drops spans of
 disabled types **before merge** (in `anonymize_detailed` and in `verify_with_llm`), so a disabled
 type is not masked — but it is still *detected* (`spans_found` counts are unaffected). All default
-to `True` except `ANONYMIZE_MONEY = False` (sums are intentionally left unmasked).
+to `True` except `ANONYMIZE_MONEY = False` and `ANONYMIZE_DATE = False` (sums and dates are
+intentionally left unmasked).
+
+Final label grouping: `LABEL_GROUPS` (type → type) drives the `relabel_groups` text step (see
+Pipeline step 6) — `name`/`surname`/`patronymic` → `person` (`[ФИО]`) and `loc` → `address`
+(`[Адрес]`). It is presentation-only (runs last, after verify; doesn't affect detection or merge),
+so the fine labels never appear in final output. `collapse_repeated_labels` then merges adjacent
+identical labels separated by whitespace only. Set `LABEL_GROUPS = {}` to disable grouping.
 
 Per-detector switches, same pattern: `DETECTOR_<NAME>` constants feed `DETECTORS_ENABLED`;
 `is_detector_enabled(name)` is the runtime check. A disabled detector is excluded from the
 *default* detector set only (see Pipeline above); explicit lists bypass the filter, and models
 still load eagerly at import. All default to `True`.
+
+Per-detector **type** allowlist, same pattern: `DETECTOR_<NAME>_TYPES` sets feed the
+`DETECTOR_TYPES` dict; `is_detector_type_enabled(name, type)` is the runtime check. A detector may
+detect anything, but only spans whose type is in its allowlist survive into the final replacement;
+the filter runs **after `split_persons` and before merge** (keys are the final
+`name`/`surname`/`patronymic`, with `person` kept as the decomposition fallback) and **applies on
+every path, including explicit detector lists** (unlike `DETECTORS_ENABLED`). A forbidden type is
+not replaced but is still *detected* (`spans_found` unaffected); the LLM verify pass honors it too.
+Each detector defaults to its own natural emit set (a no-op — edit a set to restrict, or set a
+detector's value to `None` to allow all types).
 
 ## HTTP API (`anonymizer/api.py`)
 
@@ -238,10 +262,15 @@ generated `.json`/`.html` outputs are written to (and read back from) `scripts_f
 Tests live in `tests/`; a root `conftest.py` puts the project root on `sys.path` so
 `import anonymizer` resolves under both `pytest` and `python -m pytest`.
 
-- Pure-function unit tests (regex / merge / apply / `parse_entities` / `collapse_repeated_labels`)
-  run with no optional deps.
+- Pure-function unit tests (regex / merge / apply / `parse_entities` / `relabel_groups` /
+  `collapse_repeated_labels`) run with no optional deps.
 - Tests needing Natasha/Presidio are guarded with `skipif` (`needs_natasha`/`needs_presidio`) so a
   regex-only environment skips rather than fails.
 - An autouse fixture disables LLM/LMStudio globally (patches `llm.LMSTUDIO_MODEL = None`) so tests
   are deterministic and make no network calls; LLM response parsing is tested separately against
   fixed JSON via `llm.parse_entities`.
+- **Don't write tests that assume the *default* values of the tunable config dicts**
+  (`ANONYMIZE_TYPES`, `DETECTOR_TYPES`, `DETECTORS_ENABLED`) — those are operator knobs that are
+  actively edited (e.g. types pruned from a detector's `DETECTOR_TYPES` set, `ANONYMIZE_DATE` off).
+  A test that needs a given type/detector enabled must set it explicitly via
+  `monkeypatch.setitem(config.<DICT>, key, value)`, not rely on the shipped default.

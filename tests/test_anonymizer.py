@@ -17,7 +17,9 @@
 import pytest
 
 from anonymizer import anonymize, anonymize_detailed, config
-from anonymizer.merge import apply_spans, collapse_repeated_labels, merge_spans
+from anonymizer.merge import (
+    apply_spans, collapse_repeated_labels, merge_spans, relabel_groups,
+)
 from anonymizer.persons import split_persons
 from anonymizer.span import Span
 from anonymizer.detectors import DETECTORS, llm, natasha, presidio, regex
@@ -343,10 +345,11 @@ class TestFaultToleranceRegexOnly:
 class TestAnonymizeTypeConfig:
     def test_config_covers_all_label_types(self):
         # Каждому типу-метке соответствует переключатель. По умолчанию включены
-        # все, кроме money — суммы осознанно не маскируются.
+        # все, кроме money и date — суммы и даты осознанно не маскируются.
         assert set(config.ANONYMIZE_TYPES) == set(config.LABELS)
         assert not config.ANONYMIZE_TYPES["money"]
-        assert all(v for t, v in config.ANONYMIZE_TYPES.items() if t != "money")
+        assert not config.ANONYMIZE_TYPES["date"]
+        assert all(v for t, v in config.ANONYMIZE_TYPES.items() if t not in ("money", "date"))
 
     def test_default_masks_email(self):
         res = anonymize_detailed("a@b.com", [regex], verify=False)
@@ -376,12 +379,13 @@ class TestAnonymizeTypeConfig:
 
     @needs_natasha
     def test_disable_name_component(self, monkeypatch):
-        # Компоненты ФИО управляются по отдельности: гасим только имя.
+        # Компоненты ФИО управляются по отдельности: гасим только имя. В выводе
+        # компоненты обобщаются до [ФИО] (LABEL_GROUPS), но имя не маскируется.
         monkeypatch.setitem(config.ANONYMIZE_TYPES, "name", False)
         res = anonymize_detailed("Иванов Иван Иванович", [natasha], verify=False)
-        assert "[Фамилия]" in res.text and "[Отчество]" in res.text
+        assert "[ФИО]" in res.text             # фамилия/отчество → [ФИО]
+        assert "Иван" in res.text              # имя осталось в тексте
         assert "[Имя]" not in res.text
-        assert "Иван" in res.text             # имя осталось в тексте
 
     def test_verify_skips_disabled_type(self, monkeypatch):
         # verify не должен добирать выключенный тип. Мокаем LMStudio без сети.
@@ -393,6 +397,9 @@ class TestAnonymizeTypeConfig:
         assert "7 июня" in out and "[Дата]" not in out
 
     def test_verify_masks_enabled_type(self, monkeypatch):
+        # Включённый тип verify добирает и маскирует (date включаем явно — по
+        # умолчанию он выключен).
+        monkeypatch.setitem(config.ANONYMIZE_TYPES, "date", True)
         monkeypatch.setattr(llm, "LMSTUDIO_MODEL", "m")
         monkeypatch.setattr(llm, "_lmstudio_chat",
                             lambda system, text: '{"entities":[{"type":"дата","text":"7 июня"}]}')
@@ -435,3 +442,101 @@ class TestDetectorConfig:
         monkeypatch.setitem(config.DETECTORS_ENABLED, "llm", False)
         out = llm.verify_with_llm("приём 7 июня", 1)
         assert out == "приём 7 июня"
+
+
+# ===========================================================================
+#  12. Настройка типов на детектор (config.DETECTOR_TYPES)
+# ===========================================================================
+
+class TestDetectorTypeConfig:
+    def test_config_covers_all_detectors(self):
+        # Каждому детектору соответствует набор разрешённых типов, и все они —
+        # подмножество известных типов-меток.
+        assert set(config.DETECTOR_TYPES) == {m.NAME for m in DETECTORS}
+        for allowed in config.DETECTOR_TYPES.values():
+            assert allowed <= set(config.LABELS)
+
+    def test_restriction_drops_replacement(self, monkeypatch):
+        # Убираем inn из разрешённых типов regex: ИНН детектор всё ещё находит,
+        # но в финальную замену он не попадает. Заодно проверяем, что фильтр
+        # действует и для ЯВНОГО списка детекторов.
+        monkeypatch.setitem(config.DETECTOR_TYPES, "regex",
+                            config.DETECTOR_TYPES["regex"] - {"inn"})
+        res = anonymize_detailed("ИНН 7707083893, IP 192.168.0.1", [regex], verify=False)
+        assert "7707083893" in res.text
+        assert "[ИНН]" not in res.text
+        assert "[IP]" in res.text             # другой тип того же детектора маскируется
+
+    def test_spans_found_unaffected(self, monkeypatch):
+        # Конфиг гасит замену, но не обнаружение: спан всё равно посчитан.
+        monkeypatch.setitem(config.DETECTOR_TYPES, "regex",
+                            config.DETECTOR_TYPES["regex"] - {"inn"})
+        res = anonymize_detailed("ИНН 7707083893", [regex], verify=False)
+        assert res.spans_found["regex"] == 1
+        assert "[ИНН]" not in res.text and "7707083893" in res.text
+
+    def test_none_allows_all_types(self, monkeypatch):
+        # None для детектора = разрешены все типы (поведение по умолчанию).
+        monkeypatch.setitem(config.DETECTOR_TYPES, "regex", None)
+        res = anonymize_detailed("ИНН 7707083893", [regex], verify=False)
+        assert "[ИНН]" in res.text
+
+    def test_verify_respects_detector_types(self, monkeypatch):
+        # verify не должен добирать тип, запрещённый детектору llm. Мокаем LMStudio.
+        monkeypatch.setattr(llm, "LMSTUDIO_MODEL", "m")
+        monkeypatch.setattr(llm, "_lmstudio_chat",
+                            lambda system, text: '{"entities":[{"type":"локация","text":"Москва"}]}')
+        monkeypatch.setitem(config.DETECTOR_TYPES, "llm",
+                            config.DETECTOR_TYPES["llm"] - {"loc"})
+        out = llm.verify_with_llm("город Москва", 1)
+        assert "Москва" in out and "[Локация]" not in out
+
+    def test_verify_masks_allowed_type(self, monkeypatch):
+        # Явно разрешаем loc детектору llm → verify его добирает и маскирует.
+        monkeypatch.setattr(llm, "LMSTUDIO_MODEL", "m")
+        monkeypatch.setattr(llm, "_lmstudio_chat",
+                            lambda system, text: '{"entities":[{"type":"локация","text":"Москва"}]}')
+        monkeypatch.setitem(config.DETECTOR_TYPES, "llm",
+                            config.DETECTOR_TYPES["llm"] | {"loc"})
+        out = llm.verify_with_llm("город Москва", 1)
+        assert "[Локация]" in out and "Москва" not in out
+
+
+# ===========================================================================
+#  13. Финальная группировка меток (config.LABEL_GROUPS / relabel_groups)
+# ===========================================================================
+
+class TestLabelGroups:
+    def test_config_keys_and_values_are_known_types(self):
+        for src, dst in config.LABEL_GROUPS.items():
+            assert src in config.LABELS and dst in config.LABELS
+
+    def test_single_component_to_fio(self):
+        assert relabel_groups("[Фамилия]") == "[ФИО]"
+        assert relabel_groups("[Имя]") == "[ФИО]"
+        assert relabel_groups("[Отчество]") == "[ФИО]"
+
+    def test_loc_to_address(self):
+        assert relabel_groups("[Локация]") == "[Адрес]"
+
+    def test_other_labels_untouched(self):
+        assert relabel_groups("[Организация] [Телефон]") == "[Организация] [Телефон]"
+
+    def test_consecutive_components_collapse_to_one_fio(self):
+        # Разбитое на части ФИО без пунктуации → один [ФИО] (relabel + collapse).
+        out = collapse_repeated_labels(relabel_groups("[Фамилия] [Имя] [Отчество]"))
+        assert out == "[ФИО]"
+
+    def test_components_separated_by_punctuation_not_merged(self):
+        # Разделённые запятой компоненты — это разные люди, не склеиваем.
+        out = collapse_repeated_labels(relabel_groups("[Фамилия], [Имя]"))
+        assert out == "[ФИО], [ФИО]"
+
+    def test_identical_adjacent_merged_but_not_across_punctuation(self):
+        assert collapse_repeated_labels("[Адрес] [Адрес]") == "[Адрес]"
+        assert collapse_repeated_labels("[Адрес], [Адрес]") == "[Адрес], [Адрес]"
+
+    @needs_natasha
+    def test_pipeline_full_name_becomes_single_fio(self):
+        res = anonymize_detailed("Иванов Иван Иванович", [natasha], verify=False)
+        assert res.text == "[ФИО]"

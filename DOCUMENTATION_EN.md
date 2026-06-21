@@ -168,7 +168,7 @@ from anonymizer import anonymize
 
 text = "Иванов Иван Иванович, тел. +7 916 123-45-67, ИНН 7707083893"
 print(anonymize(text))
-# → "[Фамилия] [Имя] [Отчество], тел. [Телефон], ИНН [ИНН]"
+# → "[ФИО], тел. [Телефон], ИНН [ИНН]"
 ```
 
 ---
@@ -348,7 +348,9 @@ original text
       │
       ▼
   3. type filter     — drop spans of types disabled in
-      │                ANONYMIZE_TYPES (before merge)
+      │                ANONYMIZE_TYPES, then drop spans whose
+      │                source detector may not replace that type
+      │                (DETECTOR_TYPES) — both before merge
       ▼
   4. merge_spans     — resolve overlaps by "char-painting" by
       │                PRIORITY + glue address fragments
@@ -360,11 +362,19 @@ original text
       │                 up leftover PII (up to max_verify_passes
       │                 times); skipped when verify=False
       ▼
-  7. collapse_repeated_labels — collapse runs of IDENTICAL
+  7. relabel_groups  — collapse fine labels into coarse ones per
+      │                 LABEL_GROUPS: [Имя]/[Фамилия]/[Отчество]
+      │                 → [ФИО], [Локация] → [Адрес]
+      ▼
+  8. collapse_repeated_labels — collapse runs of IDENTICAL
       │                          adjacent labels: "[X] [X]" → "[X]"
       ▼
 anonymized text  (+ spans_found)
 ```
+
+> After grouping, the fine labels `[Имя]`/`[Фамилия]`/`[Отчество]`/`[Локация]` no longer appear in
+> the final output — name components surface as `[ФИО]` and locations as `[Адрес]`. `split_persons`
+> still runs internally; the grouping is the very last, presentation-only step.
 
 ### Key mechanisms
 
@@ -482,18 +492,21 @@ Everything tunable is collected in `anonymizer/config.py`, separate from the log
 | `REGEXES` | structured-ID patterns (the `_MONEY_*` blocks compose the amount pattern) |
 | `LMSTUDIO` | `base_url`, `model` (None = auto-detect), `timeout`, `temperature`, `max_tokens`, `max_verify_passes` |
 | `LLM_SKIP_TYPES` | which types NOT to take from LLM’s answer |
+| `LABEL_GROUPS` | final grouping of fine labels into coarse ones (components → `[ФИО]`, loc → `[Адрес]`) |
 | `ANONYMIZE_*` / `ANONYMIZE_TYPES` | which types to mask |
 | `DETECTOR_*` / `DETECTORS_ENABLED` | which detectors to run |
+| `DETECTOR_*_TYPES` / `DETECTOR_TYPES` | which types each detector may replace |
 | `API` | host / port / api_key (overridable via env) / max_text_chars |
 
 ### Which types to anonymize
 
-Each span type has a boolean constant (`True` by default for all except `money` — amounts are
-intentionally left unmasked):
+Each span type has a boolean constant (`True` by default for all except `money` and `date` — amounts
+and dates are intentionally left unmasked):
 
 ```python
 ANONYMIZE_NAME = True
 ANONYMIZE_EMAIL = True
+ANONYMIZE_DATE = False    # dates are NOT masked (project default)
 ANONYMIZE_MONEY = False   # amounts are NOT masked (project default)
 ...
 ```
@@ -508,6 +521,26 @@ Behavior:
 - Full-name components are controlled separately: you can disable `name` while keeping
   `surname`/`patronymic` (the filter runs after person decomposition).
 - For the HTTP API, config edits are picked up only after a process restart.
+
+### Final label grouping (`LABEL_GROUPS`)
+
+The very last pipeline step rewrites fine labels into coarse groups, then collapses adjacent
+duplicates. `LABEL_GROUPS` maps a fine type to the type whose label replaces it:
+
+```python
+LABEL_GROUPS = {
+    "name": "person", "surname": "person", "patronymic": "person",  # → [ФИО]
+    "loc": "address",                                               # → [Адрес]
+}
+```
+
+Behavior:
+- Name components → `[ФИО]`; locations → `[Адрес]`. After grouping,
+  `collapse_repeated_labels` merges any resulting run of identical adjacent labels separated by
+  whitespace only (not punctuation): `[ФИО] [ФИО]` → `[ФИО]`, but `[ФИО], [ФИО]` stays two people.
+- This is presentation-only and runs after `verify_with_llm`, so it also normalizes labels the
+  verify pass added. It does **not** change detection or merge priorities.
+- Set `LABEL_GROUPS = {}` to disable grouping (fine labels then appear verbatim).
 
 ### Which detectors to run
 
@@ -533,6 +566,36 @@ Behavior:
 - Disabling a detector **does not cancel loading its models on import** (eager loading); it only
   removes its participation in the pipeline.
 - Like the rest of the config, it is picked up after a process restart.
+
+### Which types each detector may replace
+
+A finer knob than the on/off switch above: each detector may **find** anything, but only the span
+types listed for its source make it into the **final replacement**. Use it when testing shows one
+detector is more reliable for a type than another, or a detector false-positives on some type and
+pollutes the output — you can stop it replacing that type without disabling the whole detector.
+
+```python
+DETECTOR_REGEX_TYPES = {"email", "phone", "card", "snils", "ip", "passport", "inn", "money"}
+DETECTOR_NATASHA_TYPES = {"name", "surname", "patronymic", "person", "org", "loc", "address", "date", "money"}
+DETECTOR_PRESIDIO_TYPES = {"name", "surname", "patronymic", "person", "org", "loc", "card", "ip", "date", "inn", "snils", "passport"}
+DETECTOR_LLM_TYPES = {"name", "surname", "patronymic", "person", "org", "loc", "address", "date", "money"}
+```
+
+They are collected into the `DETECTOR_TYPES` dict; the check is `is_detector_type_enabled(name, type)`.
+
+Behavior:
+- **Defaults are each detector's natural emit set** — a no-op until you edit it. To forbid a type
+  for a detector, remove it from that detector's set; setting a detector's value to `None` allows
+  all types.
+- The filter runs **after person decomposition and before merge**, so the keys are the final types
+  (`name`/`surname`/`patronymic` rather than `person`; `person` is kept as the fallback when
+  decomposition fails) and spans still carry their originating detector (`Span.source`).
+- It applies **everywhere** — including the explicit single-detector paths
+  (`anonymize_detailed(text, [module])`, `POST /anonymize/{detector}`, the eval scripts). The
+  masked text always reflects the policy (unlike `DETECTORS_ENABLED`, which an explicit list
+  bypasses).
+- A forbidden type is **not replaced**, but is **still detected** (`spans_found` does not change).
+- The LLM verify pass honors it too (only `llm`'s allowed types are picked up).
 
 ---
 
@@ -636,7 +699,7 @@ anonymizer/                 the package
 ├── config.py               ALL settings (labels, priorities, regex, LMStudio, types, detectors, API)
 ├── span.py                 the Span model
 ├── pipeline.py             the anonymize_detailed orchestrator
-├── merge.py                merge_spans / apply_spans / collapse_repeated_labels
+├── merge.py                merge_spans / apply_spans / relabel_groups / collapse_repeated_labels
 ├── persons.py              split_persons (full-name decomposition)
 ├── api.py                  the FastAPI app
 └── detectors/

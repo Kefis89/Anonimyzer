@@ -33,6 +33,17 @@ LABELS = {
     "money":      "[Сумма]",
 }
 
+# Финальная группировка меток: на самом последнем шаге конвейера тонкие типы
+# сворачиваются в обобщающие (далее collapse_repeated_labels схлопывает соседние
+# одинаковые метки в одну). Ключ → тип, в который переименовать.
+# Компоненты ФИО → [ФИО]; локация → адрес. {} отключает группировку.
+LABEL_GROUPS = {
+    "name": "person",
+    "surname": "person",
+    "patronymic": "person",
+    "loc": "address",
+}
+
 # Приоритет на пересечении спанов: больше число — важнее метка.
 # Структурированные ID и компоненты имени важнее общих ORG/LOC/DATE.
 PRIORITY = {
@@ -126,7 +137,7 @@ ANONYMIZE_SNILS = True
 ANONYMIZE_PASSPORT = True
 ANONYMIZE_CARD = True
 ANONYMIZE_IP = True
-ANONYMIZE_DATE = True
+ANONYMIZE_DATE = False
 ANONYMIZE_MONEY = False
 
 # Сводный словарь тип → флаг (правьте константы выше; ключи совпадают с LABELS).
@@ -169,6 +180,38 @@ DETECTORS_ENABLED = {
 def is_detector_enabled(name: str) -> bool:
     """Запускать ли детектор name. Неизвестное имя считаем включённым (безопаснее)."""
     return DETECTORS_ENABLED.get(name, True)
+
+
+# --- Какие типы каждый детектор имеет право ЗАМЕНЯТЬ -------------------------
+# Детектор может НАЙТИ что угодно, но в финальную замену попадают только спаны
+# тех типов, что перечислены для его источника. Тесты показали: часть типов точнее
+# ловит regex, часть — Natasha; некоторые детекторы дают ложные срабатывания на
+# отдельных типах — здесь их можно отсечь, не выключая детектор целиком.
+# Фильтр применяется ПОСЛЕ разбора персон (split_persons) и ДО слияния, поэтому
+# ключи — финальные типы (name/surname/patronymic вместо person; person оставлен
+# как fallback, если разбор персоны не удался). На обнаружение (spans_found) не влияет.
+# По умолчанию у каждого детектора перечислен его «родной» набор — это no-op;
+# чтобы запретить тип, уберите его из набора. None = разрешены все типы.
+DETECTOR_REGEX_TYPES = {"email", "phone", "card", "snils", "ip", "passport", "inn", "money"}
+DETECTOR_NATASHA_TYPES = {"name", "surname", "patronymic", "person", "org", "loc", "address", "date", "money"}
+DETECTOR_PRESIDIO_TYPES = {"name", "surname", "patronymic", "person", "card", "ip", "date", "inn", "snils", "passport"}
+DETECTOR_LLM_TYPES = {"name", "surname", "patronymic", "person", "date", "money"}
+
+# Сводный словарь имя детектора → набор разрешённых типов (правьте константы выше).
+DETECTOR_TYPES = {
+    "regex": DETECTOR_REGEX_TYPES,
+    "natasha": DETECTOR_NATASHA_TYPES,
+    "presidio": DETECTOR_PRESIDIO_TYPES,
+    "llm": DETECTOR_LLM_TYPES,
+}
+
+
+def is_detector_type_enabled(name: str, t: str) -> bool:
+    """Имеет ли детектор name право ЗАМЕНЯТЬ тип t. Неизвестный детектор/None → всё (безопаснее)."""
+    allowed = DETECTOR_TYPES.get(name)
+    if allowed is None:
+        return True
+    return t in allowed
 
 
 # Настройки HTTP-API (FastAPI). Хост/порт/ключ можно переопределить переменными

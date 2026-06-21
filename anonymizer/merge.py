@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-from .config import LABELS, PRIORITY
+from .config import LABEL_GROUPS, LABELS, PRIORITY
 from .span import Span
 
 # Символы, через которые соседние однотипные адресные фрагменты можно склеивать.
@@ -14,6 +14,29 @@ _GLUE_GAP = re.compile(r"[\s.,;:№#\-()]*")
 
 # Подряд идущие ОДИНАКОВЫЕ метки (обратная ссылка \1 требует точного совпадения).
 _REPEATED_LABEL = re.compile(r"(\[[^\]]+\])(?:\s*\1)+")
+
+# Текстовая карта «метка → обобщающая метка» для финальной группировки
+# (config.LABEL_GROUPS, типы → текст меток). Компилируется один раз при импорте.
+_GROUP_RELABEL = {
+    LABELS[src]: LABELS[dst]
+    for src, dst in LABEL_GROUPS.items()
+    if src in LABELS and dst in LABELS
+}
+_GROUP_RELABEL_RE = (
+    re.compile("|".join(re.escape(k) for k in _GROUP_RELABEL)) if _GROUP_RELABEL else None
+)
+
+
+def relabel_groups(text: str) -> str:
+    """
+    Сворачивает тонкие метки в обобщающие по config.LABEL_GROUPS:
+    [Имя]/[Фамилия]/[Отчество] → [ФИО], [Локация] → [Адрес]. Применяется перед
+    collapse_repeated_labels, который затем схлопывает образовавшиеся соседние
+    одинаковые метки в одну (разбитое на части ФИО → один [ФИО]).
+    """
+    if _GROUP_RELABEL_RE is None:
+        return text
+    return _GROUP_RELABEL_RE.sub(lambda m: _GROUP_RELABEL[m.group(0)], text)
 
 
 def collapse_repeated_labels(text: str) -> str:

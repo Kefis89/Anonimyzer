@@ -18,5 +18,6 @@ __pycache__/
 # examples.json — исходный корпус, он ОСТАЁТСЯ в репозитории)
 scripts_for_testing/results/
 *.log
+article.md
 
 LICENSE
