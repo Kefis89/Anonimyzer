@@ -729,6 +729,7 @@ CLAUDE.md                   instructions for Claude Code
 DOCUMENTATION_RU.md         documentation in Russian
 DOCUMENTATION_EN.md         this file (documentation in English)
 LICENSE                     the MIT license
+THIRD_PARTY_LICENSES.md     third-party attribution (MIT/BSD/Apache-2.0)
 .env.example                .env template (ANONYMIZER_API_KEY / HOST / PORT)
 .gitignore                  git exclusions (.venv, .env, .claude, results/, etc.)
 ```
@@ -742,6 +743,12 @@ LICENSE                     the MIT license
 The project is distributed as **free, open-source software** — it may be freely used, copied,
 modified, and distributed. The full terms are in the [`LICENSE`](LICENSE) file in the repository
 root (the **MIT** license).
+
+The project uses third-party open-source libraries under the MIT, BSD, and Apache-2.0 licenses
+(FastAPI, Pydantic, Presidio, Natasha, spaCy, phonenumbers, and others). Their copyright holders
+and terms are listed in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md); those licenses require
+preserving the copyright notice when copies of their code are redistributed (for example, as part of
+a bundled distribution).
 
 ### Disclaimer
 
