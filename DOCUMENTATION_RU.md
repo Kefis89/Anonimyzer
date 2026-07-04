@@ -91,13 +91,30 @@ python -m spacy download ru_core_news_lg
 pip install fastapi "uvicorn[standard]" httpx python-dotenv
 ```
 
-> Версии не запинены (нет `requirements.txt`) — ставятся актуальные. Natasha тянет свои данные
-> (navec/slovnet) пакетом. spaCy-модель `ru_core_news_lg` (~0.5 ГБ) скачивается отдельной командой.
+> Показанные выше команды ставят актуальные версии. Если нужны точные протестированные версии — в
+> корне есть `requirements.txt` (его использует `install.bat`): `pip install -r requirements.txt`.
+> Natasha тянет свои данные (navec/slovnet) пакетом. spaCy-модель `ru_core_news_lg` (~0.5 ГБ)
+> скачивается отдельной командой.
 
 > ⚠️ **setuptools должен оставаться < 81.** pymorphy2 (зависимость Natasha) ищет словари через
 > `pkg_resources`, удалённый из setuptools ≥ 82 — с новым setuptools `MorphVocab()` падает и
 > Natasha-детектор молча отключается. Если что-то обновило setuptools, откатите:
 > `pip install "setuptools<81"`.
+
+### Быстрая установка на Windows (без командной строки)
+
+Для нетехнических пользователей в корне репозитория есть два bat-файла, автоматизирующих весь
+процесс выше. Единственная предпосылка — установленный [Python 3.10+](https://www.python.org/downloads/)
+(при установке отметьте «Add Python to PATH»); VS Code не нужен.
+
+1. Скачать проект: **Code → Download ZIP** на GitHub (или `git clone`), распаковать.
+2. Двойной клик по **`install.bat`** (один раз): создаёт `.venv`, ставит зависимости из
+   `requirements.txt`, качает модель spaCy `ru_core_news_lg`, фиксирует `setuptools<81` и
+   генерирует надёжный API-ключ в `.env`.
+3. Двойной клик по **`start.bat`**: поднимает HTTP API на `http://127.0.0.1:8077`. API-ключ
+   показывается в окне; проверка — `GET /health`. Останов — Ctrl+C или закрыть окно.
+
+Эти bat-файлы предназначены **только для Windows**. На Linux/macOS используйте ручные команды выше.
 
 ---
 

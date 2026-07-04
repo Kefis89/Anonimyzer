@@ -91,7 +91,8 @@ python -m spacy download ru_core_news_lg
 pip install fastapi "uvicorn[standard]" httpx python-dotenv
 ```
 
-> Versions are not pinned (there is no `requirements.txt`) — the latest ones are installed.
+> The commands above install the latest versions. If you need the exact tested versions, the repo
+> root has a `requirements.txt` (used by `install.bat`): `pip install -r requirements.txt`.
 > Natasha pulls its data (navec/slovnet) as part of the package. The spaCy model
 > `ru_core_news_lg` (~0.5 GB) is downloaded by a separate command.
 
@@ -99,6 +100,21 @@ pip install fastapi "uvicorn[standard]" httpx python-dotenv
 > via `pkg_resources`, which was removed in setuptools ≥ 82 — with newer setuptools `MorphVocab()`
 > crashes and the Natasha detector silently disables itself. If something upgraded setuptools,
 > roll it back: `pip install "setuptools<81"`.
+
+### One-click install on Windows (no command line)
+
+For non-technical users there are two bat files in the repository root that automate the whole
+process above. The only prerequisite is [Python 3.10+](https://www.python.org/downloads/)
+(tick "Add Python to PATH" during installation); VS Code is not needed.
+
+1. Get the code: **Code → Download ZIP** on GitHub (or `git clone`), unpack it.
+2. Double-click **`install.bat`** (once): creates `.venv`, installs the dependencies from
+   `requirements.txt`, downloads the spaCy model `ru_core_news_lg`, pins `setuptools<81`, and
+   generates a strong API key in `.env`.
+3. Double-click **`start.bat`**: starts the HTTP API on `http://127.0.0.1:8077`. The API key is
+   shown in the window; health check — `GET /health`. Stop with Ctrl+C or by closing the window.
+
+These bat files are **Windows-only**. On Linux/macOS use the manual steps above.
 
 ---
 
